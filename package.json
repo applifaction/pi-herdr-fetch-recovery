@@ -1,0 +1,41 @@
+{
+  "name": "pi-herdr-fetch-recovery",
+  "version": "0.1.0",
+  "description": "Resume Pi sessions and failed pi-subagents automatically when connectivity returns, with an optional Herdr error status.",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/applifaction/pi-herdr-fetch-recovery.git"
+  },
+  "homepage": "https://github.com/applifaction/pi-herdr-fetch-recovery#readme",
+  "bugs": {
+    "url": "https://github.com/applifaction/pi-herdr-fetch-recovery/issues"
+  },
+  "keywords": ["pi-package", "pi-extension", "herdr", "network", "recovery"],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:herdr": "HERDR_INTEGRATION=1 node --test tests/herdr-smoke.test.mjs"
+  },
+  "files": [
+    "index.ts",
+    "connectivity.ts",
+    "metadata.ts",
+    "network-error.ts",
+    "recovery-watcher.ts",
+    "subagent-recovery.ts",
+    "README.md",
+    "tests/"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true }
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
