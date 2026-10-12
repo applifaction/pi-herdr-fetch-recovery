@@ -23,6 +23,9 @@ const TRANSPORT_ERROR_PATTERNS = [
   /\bconnection (?:reset|refused)\b/i,
   /\b(?:econnreset|econnrefused|enetunreach|ehostunreach|enotfound|eai_again)\b/i,
   /\bdns lookup failed\b/i,
+  /\b(?:codex\s+)?sse response headers timed out after \d+ms\b/i,
+  /\b(?:headers timeout error|und_err_headers_timeout)\b/i,
+  /^(?:typeerror:\s*)?terminated$/im,
 ];
 
 const TERMINAL_NON_TRANSPORT_PATTERNS = [

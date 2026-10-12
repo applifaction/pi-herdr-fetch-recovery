@@ -23,7 +23,7 @@ test("recognizes the real fetch failure and terminal provider diagnostics", () =
   })), true);
 });
 
-test("recognizes narrow socket and DNS failures", () => {
+test("recognizes narrow socket, DNS, and provider timeout failures", () => {
   for (const message of [
     "TypeError: Failed to fetch",
     "NetworkError when attempting to fetch resource",
@@ -31,6 +31,10 @@ test("recognizes narrow socket and DNS failures", () => {
     "socket hang up",
     "connect ECONNREFUSED 127.0.0.1",
     "getaddrinfo EAI_AGAIN api.example.com",
+    "Codex SSE response headers timed out after 300000ms",
+    "Retry failed after 3 attempts: Codex SSE response headers timed out after 300000ms",
+    "terminated",
+    "TypeError: terminated",
   ]) {
     assert.equal(isNetworkTransportFailure(assistant(message)), true, message);
   }
@@ -51,6 +55,7 @@ test("does not auto-continue auth, quota, context, abort, or successful response
     assistant("Network error: 503 Service Unavailable"),
     assistant("insufficient_quota"),
     assistant("input exceeds the context window"),
+    assistant("Generation terminated due to content policy"),
     { role: "assistant", stopReason: "aborted", errorMessage: "fetch failed" },
     { role: "assistant", stopReason: "stop", errorMessage: "fetch failed" },
     { role: "toolResult", isError: true, errorMessage: "fetch failed" },

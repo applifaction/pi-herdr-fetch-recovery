@@ -192,6 +192,8 @@ test("waits only after settlement, publishes Herdr error, then sends one continu
 
   h.setIdle(true);
   await h.emit("agent_settled");
+  await waitFor(() => h.reports.some(
+    (request) => request.params?.tokens?.pica_fetch_recovery === "× Fetch failed"));
   assert.equal(await h.token(), "× Fetch failed");
   assert.match(h.statuses.get("fetch-recovery"), /waiting for internet/);
 
@@ -286,6 +288,24 @@ test("reload restores a terminal fetch failure and pending work suppresses conti
   await delay(40);
   assert.deepEqual(h.sent, []);
   assert.equal(await h.token(), null);
+});
+
+test("reload restores observed Codex timeout and terminated transport failures", async (t) => {
+  for (const errorMessage of [
+    "Codex SSE response headers timed out after 300000ms",
+    "terminated",
+  ]) {
+    await t.test(errorMessage, async (t) => {
+      const failure = { ...fetchFailure, errorMessage };
+      const h = await harness(t, { branch: [entry(failure)] });
+      await h.start();
+      assert.equal(await h.token(), "× Fetch failed");
+
+      h.setOnline(true);
+      await waitFor(() => h.sent.length === 1, `continue was not submitted for ${errorMessage}`);
+      assert.deepEqual(h.sent, ["continue"]);
+    });
+  }
 });
 
 test("uses the current provider endpoint when the model changes before failure", async (t) => {
