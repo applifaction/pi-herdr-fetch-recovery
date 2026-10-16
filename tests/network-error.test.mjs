@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isNetworkTransportFailure } from "../network-error.ts";
+import {
+  classifyRecoverableFailure,
+  isNetworkTransportFailure,
+  isRetryableProviderFailure,
+} from "../network-error.ts";
 
 const assistant = (errorMessage, extra = {}) => ({
   role: "assistant",
@@ -38,6 +42,27 @@ test("recognizes narrow socket, DNS, and provider timeout failures", () => {
   ]) {
     assert.equal(isNetworkTransportFailure(assistant(message)), true, message);
   }
+});
+
+test("recognizes only empty retryable Codex processing failures as provider recovery", () => {
+  const retryable = assistant(
+    "Codex error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.",
+    { provider: "openai-codex", api: "openai-codex-responses", content: [] },
+  );
+  assert.equal(isRetryableProviderFailure(retryable), true);
+  assert.equal(classifyRecoverableFailure(retryable), "provider");
+  assert.equal(isNetworkTransportFailure(retryable), false);
+
+  assert.equal(isRetryableProviderFailure({
+    ...retryable,
+    content: [{ type: "text", text: "partial response" }],
+  }), false, "partial responses are not safe to continue automatically");
+  assert.equal(isRetryableProviderFailure({ ...retryable, provider: "other" }), false);
+  assert.equal(isRetryableProviderFailure(assistant("Codex response failed", {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    content: [],
+  })), false);
 });
 
 test("does not auto-continue auth, quota, context, abort, or successful responses", () => {

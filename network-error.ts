@@ -9,10 +9,15 @@ type Diagnostic = {
 
 type AssistantLike = {
   role?: unknown;
+  provider?: unknown;
+  api?: unknown;
+  content?: unknown;
   stopReason?: unknown;
   errorMessage?: unknown;
   diagnostics?: unknown;
 };
+
+export type RecoverableFailureKind = "transport" | "provider";
 
 const TRANSPORT_ERROR_PATTERNS = [
   /\bfetch failed\b/i,
@@ -27,6 +32,8 @@ const TRANSPORT_ERROR_PATTERNS = [
   /\b(?:headers timeout error|und_err_headers_timeout)\b/i,
   /^(?:typeerror:\s*)?terminated$/im,
 ];
+
+const RETRYABLE_CODEX_PROCESSING_ERROR = /^Codex error:\s*An error occurred while processing your request\.\s*You can retry your request, or contact us through our help center at help\.openai\.com if the error persists\.$/i;
 
 const TERMINAL_NON_TRANSPORT_PATTERNS = [
   /\b[45]\d\d\b/,
@@ -63,4 +70,24 @@ export function isNetworkTransportFailure(message: AssistantLike | undefined): b
   const text = [terminalError, ...diagnosticText].join("\n");
 
   return TRANSPORT_ERROR_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * Recognize Codex's explicit retry invitation only when the failed response is
+ * empty. Partial text or tool calls make a fresh automatic continuation unsafe.
+ */
+export function isRetryableProviderFailure(message: AssistantLike | undefined): boolean {
+  if (!message || message.role !== "assistant" || message.stopReason !== "error") return false;
+  if (message.provider !== "openai-codex" || message.api !== "openai-codex-responses") return false;
+  if (!Array.isArray(message.content) || message.content.length !== 0) return false;
+  return typeof message.errorMessage === "string"
+    && RETRYABLE_CODEX_PROCESSING_ERROR.test(message.errorMessage.trim());
+}
+
+export function classifyRecoverableFailure(
+  message: AssistantLike | undefined,
+): RecoverableFailureKind | undefined {
+  if (isNetworkTransportFailure(message)) return "transport";
+  if (isRetryableProviderFailure(message)) return "provider";
+  return undefined;
 }

@@ -1,11 +1,14 @@
 import type { ExtensionAPI, ExtensionContext, MessageEndEvent } from "@earendil-works/pi-coding-agent";
 import { probeConnectivity, redactProbeUrl, resolveProbeUrl } from "./connectivity.ts";
 import { MetadataPublisher } from "./metadata.ts";
-import { isNetworkTransportFailure } from "./network-error.ts";
+import {
+  classifyRecoverableFailure,
+  type RecoverableFailureKind,
+} from "./network-error.ts";
 import { ConnectivityWatcher } from "./recovery-watcher.ts";
 import { SubagentRecoveryCoordinator } from "./subagent-recovery.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const STATUS_KEY = "fetch-recovery";
 
 type ContinuationState = "none" | "submitted" | "accepted";
@@ -19,9 +22,10 @@ function positiveInteger(name: string, fallback: number): number {
 export default function fetchRecovery(pi: ExtensionAPI): void {
   let active = false;
   let herdrActive = false;
-  let networkFailure = false;
+  let foregroundFailure: RecoverableFailureKind | undefined;
   let recoveryPaused = false;
   let subagentFailure = false;
+  let subagentFailureKind: RecoverableFailureKind | undefined;
   let subagentRecoveryPaused = false;
   let latestAssistant: MessageEndEvent["message"] | undefined;
   let publisher: MetadataPublisher | undefined;
@@ -36,10 +40,16 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
 
   const pollMs = positiveInteger("PI_FETCH_RECOVERY_POLL_MS", 5_000);
   const probeTimeoutMs = positiveInteger("PI_FETCH_RECOVERY_PROBE_TIMEOUT_MS", 3_000);
+  const providerRetryMs = positiveInteger("PI_FETCH_RECOVERY_PROVIDER_RETRY_MS", 30_000);
   const maxAutomaticContinuations = positiveInteger("PI_FETCH_RECOVERY_MAX_CONTINUES", 3);
 
   function hasFailure(): boolean {
-    return networkFailure || subagentFailure;
+    return foregroundFailure !== undefined || subagentFailure;
+  }
+
+  function visibleFailureKind(): RecoverableFailureKind | undefined {
+    if (foregroundFailure === "transport" || subagentFailureKind === "transport") return "transport";
+    return foregroundFailure ?? subagentFailureKind;
   }
 
   function hasPausedRecovery(): boolean {
@@ -53,7 +63,11 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
       return;
     }
     const icon = ctx.ui.theme.fg("error", "×");
-    const label = hasPausedRecovery() ? " automatic recovery paused" : " waiting for internet";
+    const label = hasPausedRecovery()
+      ? " automatic recovery paused"
+      : visibleFailureKind() === "provider"
+        ? " waiting before provider retry"
+        : " waiting for internet";
     ctx.ui.setStatus(STATUS_KEY, icon + ctx.ui.theme.fg("dim", label));
   }
 
@@ -76,15 +90,19 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
     watcher = undefined;
   }
 
-  function showFailure(ctx: ExtensionContext, paused: boolean): void {
-    networkFailure = true;
+  function showFailure(
+    ctx: ExtensionContext,
+    kind: RecoverableFailureKind,
+    paused: boolean,
+  ): void {
+    foregroundFailure = kind;
     recoveryPaused = paused;
     refreshPresentation(ctx);
   }
 
   function clearFailure(ctx: ExtensionContext): void {
     cancelWatcher();
-    networkFailure = false;
+    foregroundFailure = undefined;
     recoveryPaused = false;
     refreshPresentation(ctx);
   }
@@ -92,9 +110,11 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
   const subagentRecovery = new SubagentRecoveryCoordinator(pi, {
     pollMs,
     probeTimeoutMs,
+    providerRetryMs,
     maxContinuations: maxAutomaticContinuations,
-    onStateChange: (waiting, paused) => {
+    onStateChange: (waiting, paused, kind) => {
       subagentFailure = waiting;
+      subagentFailureKind = kind;
       subagentRecoveryPaused = paused;
       if (currentCtx) refreshPresentation(currentCtx);
     },
@@ -122,23 +142,30 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
 
   function confirmAutomaticContinuation(ctx: ExtensionContext): boolean {
     if (continuationState === "none") return false;
+    const recoveredKind = foregroundFailure;
     continuationState = "accepted";
     clearFailure(ctx);
-    ctx.ui.notify("Internet connectivity restored. Continuing automatically.", "info");
+    ctx.ui.notify(
+      recoveredKind === "provider"
+        ? "Provider retry cooldown elapsed. Continuing automatically."
+        : "Internet connectivity restored. Continuing automatically.",
+      "info",
+    );
     return true;
   }
 
-  function beginWatching(ctx: ExtensionContext): void {
+  function beginWatching(ctx: ExtensionContext, failureKind: RecoverableFailureKind): void {
     if (!active || watcher?.running || continuationState !== "none") return;
     probeUrl = resolveProbeUrl(ctx);
-    const firstNotice = !networkFailure;
+    const firstNotice = foregroundFailure === undefined;
     const paused = automaticContinuations >= maxAutomaticContinuations;
-    showFailure(ctx, paused);
+    showFailure(ctx, failureKind, paused);
 
     if (paused) {
       if (firstNotice) {
+        const subject = failureKind === "provider" ? "The provider request" : "Fetch";
         ctx.ui.notify(
-          `Fetch still fails after ${automaticContinuations} automatic continuations. `
+          `${subject} still fails after ${automaticContinuations} automatic continuations. `
             + "Automatic recovery is paused; submit a prompt manually to retry.",
           "warning",
         );
@@ -147,14 +174,23 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
     }
 
     if (firstNotice) {
-      ctx.ui.notify("Fetch failed after Pi's automatic retries. Waiting for internet connectivity…", "warning");
+      ctx.ui.notify(
+        failureKind === "provider"
+          ? "Codex could not process the request after Pi's automatic retries. Waiting before a bounded retry…"
+          : "Fetch failed after Pi's automatic retries. Waiting for internet connectivity…",
+        "warning",
+      );
     }
 
     const watchedGeneration = generation;
-    const delayMs = Math.min(pollMs * (2 ** Math.min(automaticContinuations, 10)), 60_000);
+    const baseDelayMs = failureKind === "provider" ? providerRetryMs : pollMs;
+    const maxDelayMs = failureKind === "provider" ? 300_000 : 60_000;
+    const delayMs = Math.min(baseDelayMs * (2 ** Math.min(automaticContinuations, 10)), maxDelayMs);
     watcher = new ConnectivityWatcher({
       delayMs,
-      probe: (signal) => probeConnectivity(probeUrl, signal, { timeoutMs: probeTimeoutMs }),
+      probe: failureKind === "provider"
+        ? async () => true
+        : (signal) => probeConnectivity(probeUrl, signal, { timeoutMs: probeTimeoutMs }),
       onRecovered: () => {
         if (!active || generation !== watchedGeneration || continuationState !== "none") return;
         if (!ctx.isIdle() || ctx.hasPendingMessages()) {
@@ -185,8 +221,9 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
   function settleCurrentGeneration(ctx: ExtensionContext): void {
     if (!active || handledGeneration === generation) return;
     handledGeneration = generation;
-    if (isNetworkTransportFailure(latestAssistant)) {
-      beginWatching(ctx);
+    const failureKind = classifyRecoverableFailure(latestAssistant);
+    if (failureKind) {
+      beginWatching(ctx, failureKind);
     } else if (latestAssistant) {
       automaticContinuations = 0;
       continuationState = "none";
@@ -201,9 +238,10 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
     continuationState = "none";
     cancelWatcher();
     restoreLatestAssistant(ctx);
-    if (isNetworkTransportFailure(latestAssistant) && ctx.isIdle() && !ctx.hasPendingMessages()) {
+    const failureKind = classifyRecoverableFailure(latestAssistant);
+    if (failureKind && ctx.isIdle() && !ctx.hasPendingMessages()) {
       handledGeneration = generation;
-      beginWatching(ctx);
+      beginWatching(ctx, failureKind);
     } else {
       clearFailure(ctx);
     }
@@ -213,8 +251,9 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
     description: "Show the automatic fetch-recovery watcher status",
     handler: async (_args, ctx) => {
       ctx.ui.notify(
-        `Fetch Recovery v${VERSION} loaded; active: ${active}; waiting: ${networkFailure}; `
-          + `subagent waiting: ${subagentFailure}; watcher: ${watcher?.state ?? "idle"}; `
+        `Fetch Recovery v${VERSION} loaded; active: ${active}; waiting: ${foregroundFailure !== undefined}; `
+          + `kind: ${foregroundFailure ?? "none"}; subagent waiting: ${subagentFailure}; `
+          + `watcher: ${watcher?.state ?? "idle"}; `
           + `probes: ${watcher?.attempts ?? 0}; continuations: ${automaticContinuations}/${maxAutomaticContinuations}; `
           + `handoff: ${continuationState}; Herdr: ${herdrActive ? publisher?.status ?? "pending" : "inactive"}; `
           + `target: ${probeUrl ? redactProbeUrl(probeUrl) : "unresolved"}`,
@@ -271,7 +310,7 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
   pi.on("agent_start", (_event, ctx) => {
     if (!active) return;
     const automatic = continuationState !== "none";
-    if (automatic && networkFailure) confirmAutomaticContinuation(ctx);
+    if (automatic && foregroundFailure) confirmAutomaticContinuation(ctx);
     if (!automatic) automaticContinuations = 0;
     continuationState = "none";
     generation++;
@@ -306,9 +345,10 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
   pi.on("model_select", (_event, ctx) => {
     if (!active) return;
     probeUrl = resolveProbeUrl(ctx);
-    if (networkFailure && continuationState === "none") {
+    if (foregroundFailure && continuationState === "none") {
+      const failureKind = foregroundFailure;
       cancelWatcher();
-      beginWatching(ctx);
+      beginWatching(ctx, failureKind);
     }
   });
 
@@ -324,9 +364,10 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
     startupTimer = undefined;
     cancelWatcher();
     subagentRecovery.close();
-    networkFailure = false;
+    foregroundFailure = undefined;
     recoveryPaused = false;
     subagentFailure = false;
+    subagentFailureKind = undefined;
     subagentRecoveryPaused = false;
     latestAssistant = undefined;
     automaticContinuations = 0;

@@ -1,7 +1,7 @@
 {
   "name": "pi-herdr-fetch-recovery",
-  "version": "0.1.0",
-  "description": "Resume Pi sessions and failed pi-subagents automatically when connectivity returns, with an optional Herdr error status.",
+  "version": "0.2.0",
+  "description": "Resume Pi sessions and failed pi-subagents after transport or explicitly retryable provider failures, with an optional Herdr error status.",
   "type": "module",
   "repository": {
     "type": "git",

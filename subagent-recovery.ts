@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { probeConnectivity, resolveProbeUrl } from "./connectivity.ts";
-import { isNetworkTransportFailure } from "./network-error.ts";
+import {
+  classifyRecoverableFailure,
+  type RecoverableFailureKind,
+} from "./network-error.ts";
 import { ConnectivityWatcher } from "./recovery-watcher.ts";
 
 const ASYNC_COMPLETE_EVENT = "subagent:async-complete";
@@ -14,6 +17,10 @@ type RecoveryTarget = {
   runId: string;
   index: number;
   sessionPath: string;
+};
+
+type PendingRecoveryTarget = RecoveryTarget & {
+  failureKind: RecoverableFailureKind;
 };
 
 type CompletionRow = {
@@ -36,8 +43,13 @@ type EventBus = ExtensionAPI["events"];
 type CoordinatorOptions = {
   pollMs: number;
   probeTimeoutMs: number;
+  providerRetryMs: number;
   maxContinuations: number;
-  onStateChange: (waiting: boolean, paused: boolean) => void;
+  onStateChange: (
+    waiting: boolean,
+    paused: boolean,
+    kind: RecoverableFailureKind | undefined,
+  ) => void;
   onNotice: (message: string, level: "info" | "warning") => void;
 };
 
@@ -58,7 +70,9 @@ function rowsFromCompletion(payload: CompletionPayload): RecoveryTarget[] {
 }
 
 /** Read only the active JSONL branch and classify its final assistant response. */
-export async function sessionEndsWithNetworkFailure(sessionPath: string): Promise<boolean> {
+export async function sessionRecoverableFailureKind(
+  sessionPath: string,
+): Promise<RecoverableFailureKind | undefined> {
   let entries: Array<Record<string, unknown>>;
   try {
     entries = (await readFile(sessionPath, "utf8"))
@@ -66,7 +80,7 @@ export async function sessionEndsWithNetworkFailure(sessionPath: string): Promis
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
   } catch {
-    return false;
+    return undefined;
   }
 
   const byId = new Map<string, Record<string, unknown>>();
@@ -78,12 +92,12 @@ export async function sessionEndsWithNetworkFailure(sessionPath: string): Promis
   }
   for (let entry = leaf; entry; ) {
     if (entry.type === "message") {
-      const message = entry.message as Parameters<typeof isNetworkTransportFailure>[0];
-      if (message?.role === "assistant") return isNetworkTransportFailure(message);
+      const message = entry.message as Parameters<typeof classifyRecoverableFailure>[0];
+      if (message?.role === "assistant") return classifyRecoverableFailure(message);
     }
     entry = typeof entry.parentId === "string" ? byId.get(entry.parentId) : undefined;
   }
-  return false;
+  return undefined;
 }
 
 function requestResume(
@@ -134,7 +148,7 @@ function requestResume(
 export class SubagentRecoveryCoordinator {
   private readonly pi: Pick<ExtensionAPI, "events">;
   private readonly options: CoordinatorOptions;
-  private readonly pending = new Map<string, RecoveryTarget>();
+  private readonly pending = new Map<string, PendingRecoveryTarget>();
   private readonly continuationCounts = new Map<string, number>();
   private readonly unsubscribers: Array<() => void> = [];
   private ctx: ExtensionContext | undefined;
@@ -161,7 +175,7 @@ export class SubagentRecoveryCoordinator {
     this.pending.clear();
     if (resetCounts) this.continuationCounts.clear();
     this.paused = false;
-    this.options.onStateChange(false, false);
+    this.options.onStateChange(false, false, undefined);
   }
 
   close(): void {
@@ -170,19 +184,27 @@ export class SubagentRecoveryCoordinator {
     this.ctx = undefined;
   }
 
+  private pendingFailureKind(): RecoverableFailureKind | undefined {
+    for (const target of this.pending.values()) {
+      if (target.failureKind === "transport") return "transport";
+    }
+    return this.pending.size > 0 ? "provider" : undefined;
+  }
+
   private async observeCompletion(payload: CompletionPayload): Promise<void> {
     if (!this.ctx) return;
     const targets = rowsFromCompletion(payload);
     for (const target of targets) {
-      if (await sessionEndsWithNetworkFailure(target.sessionPath)) {
-        this.pending.set(target.sessionPath, target);
+      const failureKind = await sessionRecoverableFailureKind(target.sessionPath);
+      if (failureKind) {
+        this.pending.set(target.sessionPath, { ...target, failureKind });
       } else {
         this.pending.delete(target.sessionPath);
         this.continuationCounts.delete(target.sessionPath);
       }
     }
     if (this.pending.size > 0) this.startWatcher();
-    else this.options.onStateChange(false, false);
+    else this.options.onStateChange(false, false, undefined);
   }
 
   private startWatcher(): void {
@@ -192,7 +214,7 @@ export class SubagentRecoveryCoordinator {
     );
     if (eligible.length === 0) {
       this.paused = true;
-      this.options.onStateChange(true, true);
+      this.options.onStateChange(true, true, this.pendingFailureKind());
       this.options.onNotice(
         "Subagent fetch recovery reached its automatic continuation limit. Resume the child manually to retry.",
         "warning",
@@ -201,21 +223,32 @@ export class SubagentRecoveryCoordinator {
     }
 
     this.paused = false;
-    this.options.onStateChange(true, false);
+    const failureKind = eligible.some((target) => target.failureKind === "transport")
+      ? "transport"
+      : "provider";
+    this.options.onStateChange(true, false, failureKind);
     this.options.onNotice(
-      `${eligible.length} subagent session${eligible.length === 1 ? "" : "s"} stopped after fetch failures. Waiting for internet connectivity…`,
+      failureKind === "provider"
+        ? `${eligible.length} subagent session${eligible.length === 1 ? "" : "s"} stopped after retryable provider failures. Waiting before retry…`
+        : `${eligible.length} subagent session${eligible.length === 1 ? "" : "s"} stopped after fetch failures. Waiting for internet connectivity…`,
       "warning",
     );
     const ctx = this.ctx;
     const maxCount = Math.max(...eligible.map(
       (target) => this.continuationCounts.get(target.sessionPath) ?? 0,
     ));
-    const delayMs = Math.min(this.options.pollMs * (2 ** Math.min(maxCount, 10)), 60_000);
+    const baseDelayMs = failureKind === "provider"
+      ? this.options.providerRetryMs
+      : this.options.pollMs;
+    const maxDelayMs = failureKind === "provider" ? 300_000 : 60_000;
+    const delayMs = Math.min(baseDelayMs * (2 ** Math.min(maxCount, 10)), maxDelayMs);
     this.watcher = new ConnectivityWatcher({
       delayMs,
-      probe: (signal) => probeConnectivity(resolveProbeUrl(ctx), signal, {
-        timeoutMs: this.options.probeTimeoutMs,
-      }),
+      probe: failureKind === "provider"
+        ? async () => true
+        : (signal) => probeConnectivity(resolveProbeUrl(ctx), signal, {
+            timeoutMs: this.options.probeTimeoutMs,
+          }),
       onRecovered: async () => {
         const recoveries = await Promise.all(eligible.map(async (target) => ({
           target,
@@ -235,19 +268,25 @@ export class SubagentRecoveryCoordinator {
         }
         if (failures.length > 0) {
           this.paused = true;
-          this.options.onStateChange(true, true);
+          this.options.onStateChange(true, true, this.pendingFailureKind());
           this.options.onNotice(`Could not resume failed subagent: ${failures.join("; ")}`, "warning");
           return;
         }
-        this.options.onStateChange(this.pending.size > 0, false);
+        this.options.onStateChange(
+          this.pending.size > 0,
+          false,
+          this.pending.size > 0 ? this.pendingFailureKind() : undefined,
+        );
         this.options.onNotice(
-          `Internet connectivity restored. Resumed ${recoveries.length} subagent session${recoveries.length === 1 ? "" : "s"}.`,
+          failureKind === "provider"
+            ? `Provider retry cooldown elapsed. Resumed ${recoveries.length} subagent session${recoveries.length === 1 ? "" : "s"}.`
+            : `Internet connectivity restored. Resumed ${recoveries.length} subagent session${recoveries.length === 1 ? "" : "s"}.`,
           "info",
         );
       },
       onError: (error) => {
         this.paused = true;
-        this.options.onStateChange(true, true);
+        this.options.onStateChange(true, true, this.pendingFailureKind());
         this.options.onNotice(
           `Subagent fetch recovery failed: ${error instanceof Error ? error.message : String(error)}`,
           "warning",

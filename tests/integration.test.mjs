@@ -13,6 +13,14 @@ const fetchFailure = {
   stopReason: "error",
   errorMessage: "fetch failed",
 };
+const codexProcessingFailure = {
+  role: "assistant",
+  provider: "openai-codex",
+  api: "openai-codex-responses",
+  content: [],
+  stopReason: "error",
+  errorMessage: "Codex error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.",
+};
 const success = { role: "assistant", content: [], stopReason: "stop" };
 const entry = (message) => ({ type: "message", message });
 
@@ -49,6 +57,7 @@ async function harness(t, { mode = "tui", branch = [], idle = true, probeUrl } =
     "PI_FETCH_RECOVERY_URL",
     "PI_FETCH_RECOVERY_POLL_MS",
     "PI_FETCH_RECOVERY_PROBE_TIMEOUT_MS",
+    "PI_FETCH_RECOVERY_PROVIDER_RETRY_MS",
     "PI_FETCH_RECOVERY_MAX_CONTINUES",
   ];
   const savedEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
@@ -58,6 +67,7 @@ async function harness(t, { mode = "tui", branch = [], idle = true, probeUrl } =
     HERDR_PANE_ID: "test:p1",
     PI_FETCH_RECOVERY_POLL_MS: "10",
     PI_FETCH_RECOVERY_PROBE_TIMEOUT_MS: "20",
+    PI_FETCH_RECOVERY_PROVIDER_RETRY_MS: "10",
     PI_FETCH_RECOVERY_MAX_CONTINUES: "3",
   });
   if (probeUrl) process.env.PI_FETCH_RECOVERY_URL = probeUrl;
@@ -210,6 +220,24 @@ test("waits only after settlement, publishes Herdr error, then sends one continu
   await h.emit("before_agent_start", { prompt: "continue" });
   assert.equal(await h.token(), null);
   assert.equal(h.statuses.has("fetch-recovery"), false);
+});
+
+test("continues an empty retryable Codex processing failure after a provider cooldown", async (t) => {
+  const h = await harness(t);
+  await h.start();
+  h.setIdle(false);
+  await h.emit("agent_start");
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await h.emit("message_end", { message: codexProcessingFailure });
+  }
+  h.setIdle(true);
+  await h.emit("agent_settled");
+
+  assert.equal(await h.token(), "× Fetch failed");
+  assert.match(h.statuses.get("fetch-recovery"), /waiting before provider retry/);
+  await waitFor(() => h.sent.length === 1, "provider failure did not submit continue");
+  assert.deepEqual(h.sent, ["continue"]);
+  assert.equal(h.fetchedUrls.length, 0, "provider failures should cool down instead of probing connectivity");
 });
 
 test("manual input cancels the watcher and wins over automatic continuation", async (t) => {
@@ -370,6 +398,35 @@ test("parent revives a failed pi-subagents child through acknowledged RPC", asyn
   await waitFor(() => h.reports.at(-1)?.params?.tokens?.pica_fetch_recovery === null);
 });
 
+test("parent revives a child after an empty retryable provider failure without probing", async (t) => {
+  const h = await harness(t);
+  await h.start();
+  const sessionPath = await h.writeChildSession("provider-failed-child", codexProcessingFailure);
+  const resumeRequests = [];
+  h.onBus("subagents:rpc:v1:request", (request) => {
+    resumeRequests.push(request);
+    queueMicrotask(() => h.emitBus(`subagents:rpc:v1:reply:${request.requestId}`, {
+      version: 1,
+      requestId: request.requestId,
+      success: true,
+      data: { runId: "revived-provider-run" },
+    }));
+  });
+
+  h.emitBus("subagent:async-complete", {
+    runId: "provider-failed-run",
+    results: [{ index: 0, status: "failed", success: false, sessionPath }],
+  });
+
+  await waitFor(() => resumeRequests.length === 1, "provider-failed child was not resumed");
+  assert.equal(h.fetchedUrls.length, 0);
+  assert.deepEqual(resumeRequests[0].params, {
+    id: "provider-failed-run",
+    index: 0,
+    message: "continue",
+  });
+});
+
 test("foreground pi-subagents completion uses run and task index for revival", async (t) => {
   const h = await harness(t);
   await h.start();
@@ -421,7 +478,7 @@ test("status command reports the live watcher without a model call", async (t) =
   await settleFetchFailure(h);
   assert.equal(await h.token(), "× Fetch failed");
   await h.commands.get("fetch-recovery-status").handler("", h.ctx);
-  assert.match(h.notifications.at(-1).message, /v0\.1\.0 loaded; active: true; waiting: true/);
+  assert.match(h.notifications.at(-1).message, /v0\.2\.0 loaded; active: true; waiting: true/);
   assert.match(h.notifications.at(-1).message, /Herdr: acknowledged/);
   assert.match(h.notifications.at(-1).message, /provider\.example\.test\/v1/);
 });
