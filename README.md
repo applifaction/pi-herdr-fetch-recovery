@@ -18,13 +18,13 @@ A temporary connection or provider failure should pause an agent—not end the w
 When Pi runs inside Herdr, affected sessions are highlighted in the expanded Agents sidebar:
 
 ```text
-× Fetch failed
+⏳ Waiting for Internet
 ```
 
 ## Features
 
 - Waits for Pi's final `agent_settled` event instead of competing with built-in retries.
-- Recognizes structured provider transport failures, `fetch failed`, WebSocket, DNS, socket, and connection-reset errors.
+- Recognizes structured provider transport failures, `fetch failed`, `tunnel_destination_denied`, WebSocket, DNS, socket, and connection-reset errors.
 - Recognizes the exact empty-response Codex processing error that explicitly says the request can be retried.
 - Ignores authentication, quota, rate-limit, HTTP, context-window, cancellation, partial-response, and unknown provider errors.
 - Gives manual input and manual compaction priority over automatic recovery.
@@ -70,7 +70,7 @@ Back up `~/.config/herdr/config.toml`, then add the token row to the existing `[
 rows = [
   ["state_icon", "machine", "workspace", "tab"],
   [{ token = "$pica_fetch_recovery", rules = [
-    { equals = "× Fetch failed", fg = "#dc322f", bold = true },
+    { equals = "⏳ Waiting for Internet", fg = "#268bd2", bold = true },
     { contains = "", hide = true },
   ] }],
 ]
@@ -109,7 +109,7 @@ flowchart LR
     K --> E
     E -->|Interactive session| F[Submit continue]
     E -->|pi-subagents child| G[Resume persisted child via RPC]
-    D --> H[Herdr: × Fetch failed]
+    D --> H[Herdr: ⏳ Waiting for Internet]
     K --> H
     F --> I[Agent starts]
     G --> I
@@ -120,7 +120,7 @@ flowchart LR
 
 1. Pi performs its normal automatic retries.
 2. The extension waits for `agent_settled`, confirming that no retry, compaction, or queued follow-up remains.
-3. For transport failures, it probes the active provider endpoint after a guard delay.
+3. For transport failures—including Codex `tunnel_destination_denied`—it probes the active provider endpoint after a guard delay.
 4. For the exact retryable Codex processing error, it waits for a provider cooldown instead; it does not misdiagnose the error as lost internet.
 5. It submits one literal `continue` prompt. The warning remains visible until `before_agent_start` confirms that Pi accepted it.
 
@@ -139,7 +139,7 @@ This revives the exact child session instead of fabricating or rewriting its his
 
 ### Herdr status
 
-The extension publishes the `pica_fetch_recovery` token with a 45-second lease and renews it every 15 seconds while recovery is pending. The interactive parent owns one aggregate token, so parent and child recovery cannot clear each other's warning. A crashed Pi process cannot leave the row permanently behind.
+The extension publishes the `pica_fetch_recovery` token as `⏳ Waiting for Internet` with a 45-second lease and renews it every 15 seconds while recovery is pending. The interactive parent owns one aggregate token, so parent and child recovery cannot clear each other's warning. A crashed Pi process cannot leave the row permanently behind.
 
 ## Configuration
 

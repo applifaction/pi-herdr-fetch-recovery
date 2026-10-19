@@ -2,7 +2,9 @@ import net from "node:net";
 import { performance } from "node:perf_hooks";
 
 export const FETCH_RECOVERY_TOKEN = "pica_fetch_recovery";
-export const FETCH_FAILED_LABEL = "× Fetch failed";
+export const WAITING_FOR_INTERNET_LABEL = "⏳ Waiting for Internet";
+// Backward-compatible export for consumers that imported the old constant name.
+export const FETCH_FAILED_LABEL = WAITING_FOR_INTERNET_LABEL;
 
 const SOURCE = "pi:fetch-recovery";
 const TTL_MS = 45_000;
@@ -87,7 +89,7 @@ export class MetadataPublisher {
           applies_to_source: "herdr:pi",
           seq: next.seq,
           ttl_ms: this.ttlMs,
-          tokens: { [FETCH_RECOVERY_TOKEN]: next.state ? FETCH_FAILED_LABEL : null },
+          tokens: { [FETCH_RECOVERY_TOKEN]: next.state ? WAITING_FOR_INTERNET_LABEL : null },
         },
       };
       const delivered = (await this.send(request)) || (await this.send(request));

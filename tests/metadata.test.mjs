@@ -9,6 +9,7 @@ import {
   FETCH_FAILED_LABEL,
   FETCH_RECOVERY_TOKEN,
   MetadataPublisher,
+  WAITING_FOR_INTERNET_LABEL,
 } from "../metadata.ts";
 
 async function server(t, respond) {
@@ -49,6 +50,7 @@ async function waitFor(predicate) {
 }
 
 test("publishes and clears a leased display-only Herdr token with fragmented acknowledgements", async (t) => {
+  assert.equal(FETCH_FAILED_LABEL, WAITING_FOR_INTERNET_LABEL);
   const fixture = await server(t, (socket, request) => {
     socket.write(JSON.stringify({ id: request.id, result: {} }));
     setTimeout(() => socket.end("\n"), 5);
@@ -61,7 +63,9 @@ test("publishes and clears a leased display-only Herdr token with fragmented ack
   assert.equal(request.params.agent, "pi");
   assert.equal(request.params.applies_to_source, "herdr:pi");
   assert.ok(request.params.ttl_ms > 0);
-  assert.deepEqual(request.params.tokens, { [FETCH_RECOVERY_TOKEN]: FETCH_FAILED_LABEL });
+  assert.deepEqual(request.params.tokens, {
+    [FETCH_RECOVERY_TOKEN]: "⏳ Waiting for Internet",
+  });
   assert.equal(request.params.state, undefined);
   assert.equal(request.params.state_labels, undefined);
   assert.equal(publisher.status, "acknowledged");
@@ -80,7 +84,10 @@ test("retries rejected updates and later refresh recovers", async (t) => {
   assert.equal(publisher.status, "failed");
   reject = false;
   await waitFor(() => publisher.status === "acknowledged");
-  assert.equal(fixture.requests.at(-1).params.tokens[FETCH_RECOVERY_TOKEN], FETCH_FAILED_LABEL);
+  assert.equal(
+    fixture.requests.at(-1).params.tokens[FETCH_RECOVERY_TOKEN],
+    WAITING_FOR_INTERNET_LABEL,
+  );
 });
 
 test("failed clears remain retryable instead of being cached as success", async (t) => {
@@ -117,7 +124,10 @@ test("rapid transitions preserve the newest state and shutdown leaves a clear", 
   const fixture = await server(t, (socket, request) => setTimeout(() => acknowledge(socket, request), 5));
   const publisher = new MetadataPublisher(fixture.path, "test:p1", { refreshMs: 10_000 });
   await Promise.all([publisher.set(true), publisher.set(false), publisher.set(true)]);
-  assert.equal(fixture.requests.at(-1).params.tokens[FETCH_RECOVERY_TOKEN], FETCH_FAILED_LABEL);
+  assert.equal(
+    fixture.requests.at(-1).params.tokens[FETCH_RECOVERY_TOKEN],
+    WAITING_FOR_INTERNET_LABEL,
+  );
   await publisher.close();
   assert.equal(fixture.requests.at(-1).params.tokens[FETCH_RECOVERY_TOKEN], null);
   const sequences = fixture.requests.map((request) => request.params.seq);

@@ -203,16 +203,16 @@ test("waits only after settlement, publishes Herdr error, then sends one continu
   h.setIdle(true);
   await h.emit("agent_settled");
   await waitFor(() => h.reports.some(
-    (request) => request.params?.tokens?.pica_fetch_recovery === "× Fetch failed"));
-  assert.equal(await h.token(), "× Fetch failed");
+    (request) => request.params?.tokens?.pica_fetch_recovery === "⏳ Waiting for Internet"));
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
   assert.match(h.statuses.get("fetch-recovery"), /waiting for internet/);
 
   h.setOnline(true);
   await waitFor(() => h.sent.length === 1, "continue was not submitted");
   assert.deepEqual(h.sent, ["continue"]);
-  assert.equal(await h.token(), "× Fetch failed", "error remains until Pi accepts the prompt");
+  assert.equal(await h.token(), "⏳ Waiting for Internet", "error remains until Pi accepts the prompt");
   await h.emit("session_before_compact", { reason: "threshold", signal: new AbortController().signal });
-  assert.equal(await h.token(), "× Fetch failed", "automatic compaction preserves the pending handoff");
+  assert.equal(await h.token(), "⏳ Waiting for Internet", "automatic compaction preserves the pending handoff");
 
   await h.emit("agent_settled");
   await delay(30);
@@ -233,7 +233,7 @@ test("continues an empty retryable Codex processing failure after a provider coo
   h.setIdle(true);
   await h.emit("agent_settled");
 
-  assert.equal(await h.token(), "× Fetch failed");
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
   assert.match(h.statuses.get("fetch-recovery"), /waiting before provider retry/);
   await waitFor(() => h.sent.length === 1, "provider failure did not submit continue");
   assert.deepEqual(h.sent, ["continue"]);
@@ -244,7 +244,7 @@ test("manual input cancels the watcher and wins over automatic continuation", as
   const h = await harness(t);
   await h.start();
   await settleFetchFailure(h);
-  assert.equal(await h.token(), "× Fetch failed");
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
   await h.emit("input", { source: "interactive", text: "I will handle this" });
   h.setOnline(true);
   await delay(40);
@@ -256,7 +256,7 @@ test("manual compaction cancels a pending recovery handoff", async (t) => {
   const h = await harness(t);
   await h.start();
   await settleFetchFailure(h);
-  assert.equal(await h.token(), "× Fetch failed");
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
   await h.emit("session_before_compact", { reason: "manual", signal: new AbortController().signal });
   h.setOnline(true);
   await delay(40);
@@ -273,7 +273,7 @@ test("automatic compaction does not erase a transport failure before settlement"
   await h.emit("session_before_compact", { reason: "threshold", signal: new AbortController().signal });
   h.setIdle(true);
   await h.emit("agent_settled");
-  assert.equal(await h.token(), "× Fetch failed");
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
 });
 
 test("successful and unrelated failures never arm recovery", async (t) => {
@@ -310,7 +310,7 @@ test("reload restores a terminal fetch failure and pending work suppresses conti
   assert.equal(await h.token(), null);
   h.setPending(false);
   await h.emit("session_tree");
-  assert.equal(await h.token(), "× Fetch failed");
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
   h.setPending(true);
   h.setOnline(true);
   await delay(40);
@@ -322,12 +322,13 @@ test("reload restores observed Codex timeout and terminated transport failures",
   for (const errorMessage of [
     "Codex SSE response headers timed out after 300000ms",
     "terminated",
+    "Codex error: tunnel_destination_denied",
   ]) {
     await t.test(errorMessage, async (t) => {
       const failure = { ...fetchFailure, errorMessage };
       const h = await harness(t, { branch: [entry(failure)] });
       await h.start();
-      assert.equal(await h.token(), "× Fetch failed");
+      assert.equal(await h.token(), "⏳ Waiting for Internet");
 
       h.setOnline(true);
       await waitFor(() => h.sent.length === 1, `continue was not submitted for ${errorMessage}`);
@@ -359,7 +360,7 @@ test("caps generation-spanning automatic continuations during a persistent API f
 
   await delay(100);
   assert.deepEqual(h.sent, ["continue", "continue", "continue"]);
-  assert.equal(await h.token(), "× Fetch failed");
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
   assert.match(h.statuses.get("fetch-recovery"), /automatic recovery paused/);
 });
 
@@ -383,8 +384,8 @@ test("parent revives a failed pi-subagents child through acknowledged RPC", asyn
     results: [{ index: 0, status: "failed", success: false, sessionPath }],
   });
   await waitFor(() => h.reports.some(
-    (request) => request.params?.tokens?.pica_fetch_recovery === "× Fetch failed"));
-  assert.equal(await h.token(), "× Fetch failed");
+    (request) => request.params?.tokens?.pica_fetch_recovery === "⏳ Waiting for Internet"));
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
   assert.equal(resumeRequests.length, 0);
 
   h.setOnline(true);
@@ -448,7 +449,7 @@ test("foreground pi-subagents completion uses run and task index for revival", a
     sessionFile,
   });
   await waitFor(() => h.reports.some(
-    (request) => request.params?.tokens?.pica_fetch_recovery === "× Fetch failed"));
+    (request) => request.params?.tokens?.pica_fetch_recovery === "⏳ Waiting for Internet"));
   h.setOnline(true);
   await waitFor(() => requests.length === 1);
   assert.deepEqual(requests[0].params, {
@@ -476,9 +477,9 @@ test("status command reports the live watcher without a model call", async (t) =
   const h = await harness(t);
   await h.start();
   await settleFetchFailure(h);
-  assert.equal(await h.token(), "× Fetch failed");
+  assert.equal(await h.token(), "⏳ Waiting for Internet");
   await h.commands.get("fetch-recovery-status").handler("", h.ctx);
-  assert.match(h.notifications.at(-1).message, /v0\.2\.0 loaded; active: true; waiting: true/);
+  assert.match(h.notifications.at(-1).message, /v0\.3\.0 loaded; active: true; waiting: true/);
   assert.match(h.notifications.at(-1).message, /Herdr: acknowledged/);
   assert.match(h.notifications.at(-1).message, /provider\.example\.test\/v1/);
 });

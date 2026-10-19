@@ -35,6 +35,8 @@ test("recognizes narrow socket, DNS, and provider timeout failures", () => {
     "socket hang up",
     "connect ECONNREFUSED 127.0.0.1",
     "getaddrinfo EAI_AGAIN api.example.com",
+    "Codex error: tunnel_destination_denied",
+    "Codex error: tunnel destination denied",
     "Codex SSE response headers timed out after 300000ms",
     "Retry failed after 3 attempts: Codex SSE response headers timed out after 300000ms",
     "terminated",

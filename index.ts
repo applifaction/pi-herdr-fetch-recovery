@@ -8,7 +8,7 @@ import {
 import { ConnectivityWatcher } from "./recovery-watcher.ts";
 import { SubagentRecoveryCoordinator } from "./subagent-recovery.ts";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const STATUS_KEY = "fetch-recovery";
 
 type ContinuationState = "none" | "submitted" | "accepted";
@@ -163,7 +163,7 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
 
     if (paused) {
       if (firstNotice) {
-        const subject = failureKind === "provider" ? "The provider request" : "Fetch";
+        const subject = failureKind === "provider" ? "The provider request" : "The connection";
         ctx.ui.notify(
           `${subject} still fails after ${automaticContinuations} automatic continuations. `
             + "Automatic recovery is paused; submit a prompt manually to retry.",
@@ -177,7 +177,7 @@ export default function fetchRecovery(pi: ExtensionAPI): void {
       ctx.ui.notify(
         failureKind === "provider"
           ? "Codex could not process the request after Pi's automatic retries. Waiting before a bounded retry…"
-          : "Fetch failed after Pi's automatic retries. Waiting for internet connectivity…",
+          : "Connection interrupted after Pi's automatic retries. Waiting for internet connectivity…",
         "warning",
       );
     }

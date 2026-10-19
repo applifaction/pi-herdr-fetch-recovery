@@ -26,6 +26,7 @@ const TRANSPORT_ERROR_PATTERNS = [
   /\bwebsocket error\b/i,
   /\bsocket hang up\b/i,
   /\bconnection (?:reset|refused)\b/i,
+  /\btunnel[_ -]destination[_ -]denied\b/i,
   /\b(?:econnreset|econnrefused|enetunreach|ehostunreach|enotfound|eai_again)\b/i,
   /\bdns lookup failed\b/i,
   /\b(?:codex\s+)?sse response headers timed out after \d+ms\b/i,
